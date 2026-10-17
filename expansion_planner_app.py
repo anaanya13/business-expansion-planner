@@ -393,13 +393,60 @@ def money(value):
     return f'${value:,.0f}'
 
 
+
+def manual_history():
+    st.markdown('### Enter monthly figures')
+    st.write('No spreadsheet needed. Enter one completed month at a time for your existing location. You can start with one month and add more when available.')
+    st.caption('Use CAD totals for the whole month, not daily figures. Leave unknown figures empty; enter 0 only when you know the actual total was zero. Sales should exclude sales tax; payroll should include employer costs.')
+    labels={'Net sales revenue':'revenue','Cost of goods / ingredients':'cogs',
+            'Payroll including employer costs':'payroll','Occupancy / rent':'rent',
+            'Other operating costs':'other'}
+    headers={'revenue':'Revenue','cogs':'COGS','payroll':'Payroll','rent':'Rent','other':'Other expenses'}
+    with st.form('manual_month_form',clear_on_submit=False):
+        last_month=(pd.Timestamp.today().replace(day=1)-pd.DateOffset(months=1)).date()
+        entered_month=st.date_input('Month these figures describe',value=last_month,key='manual_month')
+        st.caption('Only saved figures are analysed. Select Save month after changing this form. Any day selects that calendar month. To update a month already entered, save it again; it replaces that month rather than adding it twice.')
+        values={}
+        cols=st.columns(2)
+        for i,(label,field) in enumerate(labels.items()):
+            with cols[i%2]:
+                values[headers[field]]=st.number_input(label+' (CAD)',min_value=0.,max_value=1e12,value=None,step=100.,placeholder='Unknown / not entered',key='manual_'+field)
+        submitted=st.form_submit_button('Save month',type='primary')
+    if submitted:
+        month=pd.Timestamp(entered_month).replace(day=1)
+        if month>=pd.Timestamp.today().replace(day=1).normalize():
+            st.error('Choose a completed month before the current month. Future estimates belong in Build your plan.')
+        elif all(v is None for v in values.values()):
+            st.error('Enter at least one monthly sales or cost figure. Leave the other fields empty if unknown.')
+        else:
+            rows=dict(st.session_state.get('manual_months',{}))
+            rows[month.strftime('%Y-%m-%d')]={'Month':month.strftime('%Y-%m-%d'),**values}
+            st.session_state['manual_months']=rows
+            st.success('Month saved. Review the figures below; changes require a fresh review and forecast.')
+    rows=st.session_state.get('manual_months',{})
+    if not rows:
+        st.info('Enter your first month and select Save month to continue.'); return None
+    ordered=pd.DataFrame([rows[k] for k in sorted(rows)])
+    st.caption(f'{len(ordered)} saved month(s). Saved entries stay in this browser session only. Download a copy before closing it.')
+    st.dataframe(ordered,hide_index=True,width='stretch')
+    remove=st.selectbox('Month to remove',list(sorted(rows)),key='manual_remove_month')
+    if st.button('Remove selected month'):
+        rows=dict(rows); rows.pop(remove,None); st.session_state['manual_months']=rows
+        st.rerun()
+    st.download_button('Download entered monthly figures',safe_csv(ordered),'entered_monthly_figures.csv','text/csv')
+    return [('entered_monthly_figures.csv',ordered.to_csv(index=False).encode('utf-8'))]
+
+
 def prepare():
     st.subheader('Bring your business history')
-    st.write('Upload financial records from one existing location. Start with a monthly summary, or separate sales and expense files.')
-    source=st.radio('Choose a starting point',['Try the café example','Upload company files'],horizontal=True)
+    st.write('Upload financial records from one existing location. Or type monthly figures directly if you do not have a spreadsheet.')
+    source=st.radio('Choose a starting point',['Try the café example','Upload company files','Enter data manually'],horizontal=True)
     if source=='Try the café example':
         uploads=[('cafe_monthly_demo.csv', b'Reporting Month,Net Takings,Ingredient Costs,Staff Costs,Occupancy Costs,Other Expenses\n2025-10,39000,11700,14000,6200,2800\n2025-11,37500,11250,14000,6200,2800\n2025-12,42500,12750,14800,6200,3100\n2026-01,34000,10200,14000,6200,2700\n2026-02,36000,10800,14000,6200,2700\n2026-03,40000,12000,14000,6200,2800\n2026-04,42000,12600,14200,6200,2800\n2026-05,44000,13200,14200,6200,2800\n2026-06,46000,13800,14500,6200,3000\n2026-07,47000,14100,14500,6200,3000\n2026-08,46500,13950,14500,6200,3000\n2026-09,42500,12750,14200,6200,2800\n')]
         st.info('Fictional practice data. These are not actual company results or the earlier Excel model’s forecast.')
+    elif source=='Enter data manually':
+        uploads=manual_history()
+        if uploads is None: return None
     else:
         files=st.file_uploader('Excel or CSV · up to 5 files · 20 MB each',type=['xlsx','csv'],accept_multiple_files=True)
         if not files:
@@ -415,7 +462,7 @@ def prepare():
     selected_sources=[]
     for pos,(filename,content) in enumerate(uploads):
         uploadkey=digest(content)+f'_{pos}'
-        st.success(f'✓ Uploaded · {filename}')
+        st.success(f'✓ {"Entered" if source=="Enter data manually" else "Uploaded"} · {filename}')
         if filename.lower().endswith('.xlsx'):
             try:
                 available=sheet_names(content)
