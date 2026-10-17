@@ -22,7 +22,7 @@ ALIASES = {
     'cogs': ['cogs', 'cost of goods', 'cost of goods sold', 'cost of sales', 'ingredients', 'food cost', 'ingredient costs'],
     'payroll': ['payroll', 'wages', 'staff cost', 'staff costs', 'labour costs', 'labor costs', 'salaries', 'employee costs'],
     'rent': ['rent', 'occupancy', 'occupancy costs', 'lease expense', 'premises cost'],
-    'other': ['other expenses', 'other costs', 'other operating costs', 'overheads', 'operating overhead'],
+    'other': ['other', 'other expenses', 'other costs', 'other operating costs', 'overheads', 'operating overhead'],
     'amount': ['amount', 'value', 'net amount', 'transaction amount', 'total amount', 'paid amount'],
 }
 
@@ -401,14 +401,119 @@ def report(plan, summaries, source_notes):
     return '\n'.join(lines)
 
 
+import re
+import math
+import pandas as pd
+
+EXCLUDE='Exclude from operating history'
+REVIEW='Needs review'
+
+def subtotal_candidates(frame):
+    pattern=r'(?i)\b(subtotal|grand total|opening balance|closing balance|net profit|gross profit|total income|total expenses)\b|^total(?:\s|$)'
+    return [i for i,row in enumerate(frame.itertuples(index=False,name=None)) if any(re.search(pattern,str(v).strip()) for v in row)]
+
+def convert_amount(value,currency,rate):
+    code=str(currency).strip().upper()
+    if not re.fullmatch('[A-Z]{3}',code):
+        raise ValueError('Provide a three-letter currency code for every included row, such as CAD or USD.')
+    try: factor=float(rate)
+    except (ValueError,TypeError): raise ValueError('Supply a positive CAD-per-unit exchange rate for every foreign-currency row.')
+    if not math.isfinite(factor) or factor<=0 or (code=='CAD' and factor!=1):
+        raise ValueError('Rates must be positive and finite; CAD must use 1. Rate means CAD for one source-currency unit.')
+    if pd.isna(value):return None
+    text=str(value).strip()
+    found=re.findall(r'\b[A-Za-z]{3}\b',text)
+    if any(token.upper()!=code for token in found):
+        raise ValueError('An amount currency label conflicts with the selected currency. Correct it before conversion.')
+    if code!='CAD': text=re.sub(r'\b'+code+r'\b','',text,flags=re.I).strip()
+    val=number(text)
+    if val is None:return None
+    converted=val*factor
+    if not math.isfinite(converted) or abs(converted)>1e12:raise ValueError('Converted amount exceeds the supported range.')
+    return converted
+
+def fx_convert(frame,amount_columns,currency_column,rate_column):
+    if not amount_columns:raise ValueError('Select the monetary columns to convert.')
+    if currency_column in amount_columns or rate_column in amount_columns:raise ValueError('Currency and rate columns cannot also be amount columns.')
+    out=frame.copy().astype(object)
+    for i,row in frame.iterrows():
+        for col in amount_columns:
+            try: out.loc[i,col]=convert_amount(row[col],row[currency_column],1 if str(row[currency_column]).strip().upper()=='CAD' else row[rate_column])
+            except ValueError as exc:raise ValueError(f'Row {i+1}, {col}: {exc}') from exc
+    return out
+
+def prepare_bank(frame,date_column,category_column,choices,amount_column=None,debit_column=None,credit_column=None,order='ISO / year first'):
+    columns=[date_column,category_column]+([amount_column] if amount_column else [debit_column,credit_column])
+    if len(set(columns))!=len(columns):raise ValueError('Date, category and amount columns must be different.')
+    included=frame[frame[category_column].astype(str).map(choices)!=EXCLUDE]
+    if included.astype(str).duplicated().any():
+        raise ValueError('Possible duplicate bank rows. Review them and exclude accidental copies, or supply unique references for separate transactions.')
+    records=[]
+    for i,row in frame.iterrows():
+        category=choices.get(str(row[category_column]),REVIEW)
+        if category==EXCLUDE:continue
+        if category not in FINANCIAL:raise ValueError(f'Choose a category or explicit exclusion for {row[category_column]!s}.')
+        try:
+            period=month(row[date_column],order)
+            if amount_column: amount=number(row[amount_column])
+            else:
+                debit=number(row[debit_column]); credit=number(row[credit_column])
+                if any(v is not None and v<0 for v in [debit,credit]):raise ValueError('Debit/credit columns must use nonnegative amounts.')
+                if debit and credit:raise ValueError('Both debit and credit contain amounts. Resolve this row before preparing.')
+                amount=None if debit is None and credit is None else (credit or 0)-(debit or 0)
+            # Signed bank amount: inflows positive. Expense refunds therefore reduce cost.
+            value=amount if category=='revenue' or amount is None else -amount
+            records.append({'period':period,'field':category,'value':value})
+        except ValueError as exc:raise ValueError(f'Source row {i+1}: {exc}') from exc
+    if not records:raise ValueError('No included operating transactions remain.')
+    long=pd.DataFrame(records)
+    rows=[]
+    for period,group in long.groupby('period'):
+        item={'Month':period.strftime('%Y-%m')}
+        for field in FINANCIAL:
+            values=group.loc[group.field==field,'value']
+            item[FIELDS[field]]=float(values.sum()) if len(values) and values.notna().all() else None
+        rows.append(item)
+    # Use canonical aliases for compatibility with the standard review.
+    return pd.DataFrame(rows).rename(columns={FIELDS[f]:f for f in FINANCIAL})
+
+def prepare_sideways(frame,label_column,period_columns,choices):
+    if not period_columns:raise ValueError('Select at least one monthly column, excluding Total/YTD.')
+    periods=[month(c) for c in period_columns]
+    if len(set(periods))!=len(periods):raise ValueError('Two selected columns describe the same month. Select one.')
+    selected={}
+    for i,row in frame.iterrows():
+        field=choices.get(i,REVIEW)
+        if field==EXCLUDE:continue
+        if field not in FINANCIAL:raise ValueError(f'Choose a category or exclusion for row {i+1}: {row[label_column]}.')
+        selected.setdefault(field,[]).append(i)
+    if not selected:raise ValueError('Select at least one operating category.')
+    indices=[i for group in selected.values() for i in group]
+    if frame.loc[indices].astype(str).duplicated().any():raise ValueError('Possible duplicate report rows. Exclude copies or supply distinct account references before combining.')
+    result=[]
+    for col,period in zip(period_columns,periods):
+        item={'Month':period.strftime('%Y-%m')}
+        for field,indices in selected.items():
+            vals=[number(frame.loc[i,col]) for i in indices]
+            item[field]=sum(vals) if all(v is not None for v in vals) else None
+        result.append(item)
+    return pd.DataFrame(result)
+
+
+# Fictional records for reproducible public testing; exchange rates are illustrative.
+DEMO_SAMPLES = {'bank_mixed.csv': 'Date,Category,Amount,Reference\n2025-01-02,Sales,5000,R001\n2025-01-03,Ingredients,-1200,P001\n2025-01-04,Payroll,-1500,P002\n2025-01-05,Rent,-800,P003\n2025-01-06,Loan proceeds,10000,F001\n2025-01-07,Transfer,-2000,T001\n2025-01-08,Sales,-100,R002\n2025-01-09,Ingredients,50,P004\n', 'sideways_profit_loss.csv': 'Account,Jan 2025,Feb 2025,Total\nProduct sales,5000,6000,11000\nService sales,1000,1500,2500\nTotal income,6000,7500,13500\nIngredients,1500,1800,3300\nWages,2000,2100,4100\nRent,800,800,1600\nUtilities,200,,200\nNet profit,1500,2800,4300\n', 'bank_debit_credit.csv': 'Date,Category,Debit,Credit,Reference\n2025-01-01,Sales,,5000,R1\n2025-01-02,Payroll,1500,,P1\n2025-01-03,Sales,100,,R2\n2025-01-04,Payroll,,50,P2\n', 'mixed_currency.csv': 'Date,Category,Amount,Currency,CAD per unit,Reference\n2025-01-01,Sales,1000,USD,1.4,R1\n2025-01-02,Sales,500,CAD,1,R2\n2025-01-03,Ingredients,-100,EUR,1.5,P1\n2025-01-04,Rent,-200,CAD,1,P2\n'}
+
+
 from dataclasses import asdict
 from hashlib import sha256
 from pathlib import Path
 import json
+import re
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+
 
 
 ROOT=Path(__file__).resolve().parent
@@ -466,13 +571,101 @@ def manual_history():
     return [('entered_monthly_figures.csv',ordered.to_csv(index=False).encode('utf-8'))]
 
 
+
+def prepare_special_export(raw,key,foreign_required=False):
+    """Keep the original available; transformations require explicit review."""
+    layout=st.selectbox('File layout',['Standard monthly / single-category transactions','Mixed bank transactions','Report with months across columns'],key='layout_'+key)
+    original=raw.copy()
+    allowed_amounts=None
+    candidates=subtotal_candidates(raw)
+    with st.expander('Review subtotal / non-operating rows and currencies',expanded=bool(candidates) or foreign_required):
+        st.caption('Original row numbers below are table rows starting at 1, excluding the header. Exclusions are explicit and remain in the original-source download. Never include both a subtotal and its detail.')
+        if candidates: st.warning('Possible summary/balance rows: '+', '.join(str(i+1) for i in candidates)+'. Review them; labels alone cannot prove which row should be used.')
+        excluded_text=st.text_input('Rows to exclude after review (for example 2, 5)',key='exclude_'+key)
+        try:
+            exclude=sorted({int(x.strip())-1 for x in excluded_text.split(',') if x.strip()})
+            if any(i<0 or i>=len(raw) for i in exclude):raise ValueError()
+        except ValueError:
+            st.info('Enter valid table row numbers separated by commas.');return None
+        kept_candidates=[i for i in candidates if i not in exclude]
+        accept=not kept_candidates or st.checkbox('I reviewed the flagged rows I am keeping and confirmed they do not duplicate other included figures.',key='keep_totals_'+key)
+        working=raw.drop(index=exclude).reset_index(drop=True)
+        convert=st.checkbox('Convert source amounts to CAD using rates in this file',key='fx_'+key)
+        if convert:
+            st.caption('Rate means CAD per 1 unit of source currency (USD amount × CAD-per-USD rate). Supply the appropriate dated/accounting rate in the file. No live rate is fetched. CAD rows use 1. Amounts must use dot decimals; do not convert an already-CAD report again.')
+            options=list(raw.columns)
+            curr=st.selectbox('Currency code column',options,key='fx_currency_'+key)
+            rate=st.selectbox('CAD-per-unit exchange rate column',options,key='fx_rate_'+key)
+            amounts=st.multiselect('Amount columns to convert',options,key='fx_amounts_'+key)
+            if curr==rate:
+                st.info('Choose different currency and rate columns.');return None
+            if not st.checkbox('I confirm these source currencies and rates, and that the selected amounts are not already CAD.',key='fx_confirm_'+key):return None
+            try:working=fx_convert(working,amounts,curr,rate)
+            except ValueError as exc:st.warning(str(exc));return None
+            allowed_amounts=amounts
+        elif foreign_required:
+            st.info('This source needs currency review. Use the conversion controls, or provide a verified CAD export.');return None
+    if not accept:
+        st.info('Confirm the flagged rows or exclude them to continue.');return None
+    if working.empty:
+        st.info('No rows remain after exclusions.');return None
+    st.download_button('Download original source with exclusion audit',safe_csv(original.assign(Excluded_before_preparation=[i in exclude for i in original.index])),f'source_review_{key}.csv','text/csv',key='original_'+key)
+    audit=f'Layout: {layout}; excluded original table rows: {[i+1 for i in exclude]}; currency conversion: {convert}.'
+    if convert:audit+=' Currency column: '+curr+'; rate column: '+rate+'; converted amount columns: '+str(amounts)
+    money_columns=allowed_amounts if allowed_amounts is not None else list(working.columns)
+    options=[REVIEW]+FINANCIAL+[EXCLUDE]
+    fmt=lambda f:FIELDS.get(f,f)
+    if layout=='Mixed bank transactions':
+        st.warning('Bank cash movements are not automatically accounting revenue or expense. Explicitly exclude loans, transfers, owner funding, tax and equipment purchases from operating history. Review deposits, tax and refunds before using the totals.')
+        datecol=st.selectbox('Bank transaction date',list(working.columns),key='bank_date_'+key)
+        catcol=st.selectbox('Category or description column',list(working.columns),key='bank_cat_'+key)
+        style=st.radio('Bank amount layout',['Signed amount (money in positive)','Separate debit / credit'],key='bank_style_'+key)
+        kwargs={}
+        if style.startswith('Signed'):
+            kwargs['amount_column']=st.selectbox('Signed amount column',money_columns,key='bank_amount_'+key)
+        else:
+            kwargs['debit_column']=st.selectbox('Debit / money out column',money_columns,key='bank_debit_'+key)
+            kwargs['credit_column']=st.selectbox('Credit / money in column',money_columns,key='bank_credit_'+key)
+        order=st.selectbox('Bank date order',['ISO / year first','Day first','Month first'],key='bank_order_'+key)
+        labels=list(working[catcol].astype(str).unique())
+        if len(labels)>100:
+            st.info('More than 100 distinct descriptions. Add a category column to your source to group them before importing.');return None
+        choices={label:st.selectbox(f'Meaning of {label or "(blank)"}',options,format_func=fmt,key='bank_choice_'+key+'_'+digest(label)) for label in labels}
+        if not st.checkbox('I confirm the category choices, excluded movements and coverage of these bank records.',key='bank_confirm_'+key):return None
+        bank_audit=working.assign(Chosen_use=working[catcol].astype(str).map(choices))
+        try:working=prepare_bank(working,datecol,catcol,choices,order=order,**kwargs)
+        except ValueError as exc:st.warning(str(exc));return None
+        st.download_button('Download reviewed bank categories and amounts',safe_csv(bank_audit),'bank_preparation_audit.csv','text/csv',key='bank_audit_'+key)
+        audit+=' Bank mappings: '+str((datecol,catcol,kwargs,order,choices))
+    elif layout=='Report with months across columns':
+        labelcol=st.selectbox('Account / line-item column',list(working.columns),key='wide_label_'+key)
+        periods=st.multiselect('Monthly columns (include the year; omit Total/YTD)',[c for c in money_columns if c!=labelcol],key='wide_periods_'+key)
+        st.caption('Choose either each category total or its component rows, never both. Exclude headings, gross/net profit, balance rows and non-operating lines. Unknown amounts remain unknown. Month headers must include the year.')
+        if len(working)>100:
+            st.info('Use at most 100 report rows for this review.');return None
+        choices={i:st.selectbox(f'Row {i+1}: {row[labelcol]}',options,format_func=fmt,key='wide_choice_'+key+'_'+str(i)) for i,row in working.iterrows()}
+        if not st.checkbox('I confirm the selected monthly columns and row meanings, with no subtotal/detail double counting.',key='wide_confirm_'+key):return None
+        wide_audit=working.assign(Chosen_use=[choices[i] for i in working.index])
+        try:working=prepare_sideways(working,labelcol,periods,choices)
+        except ValueError as exc:st.warning(str(exc));return None
+        st.download_button('Download reviewed report rows',safe_csv(wide_audit),'report_preparation_audit.csv','text/csv',key='wide_audit_'+key)
+        audit+=' Report mappings: '+str((labelcol,periods,choices))
+    st.caption('Prepared figures below still need the normal column, date and coverage review. Missing categories stay unknown.')
+    return working,layout,audit,allowed_amounts if layout=='Standard monthly / single-category transactions' else None
+
+
 def prepare():
     st.subheader('Bring your business history')
     st.write('Upload financial records from one existing location. Or type monthly figures directly if you do not have a spreadsheet.')
-    source=st.radio('Choose a starting point',['Try the café example','Upload company files','Enter data manually'],horizontal=True)
+    source=st.radio('Choose a starting point',['Try the café example','Upload company files','Enter data manually','Try statement/report samples'],horizontal=True)
     if source=='Try the café example':
         uploads=[('cafe_monthly_demo.csv', b'Reporting Month,Net Takings,Ingredient Costs,Staff Costs,Occupancy Costs,Other Expenses\n2025-10,39000,11700,14000,6200,2800\n2025-11,37500,11250,14000,6200,2800\n2025-12,42500,12750,14800,6200,3100\n2026-01,34000,10200,14000,6200,2700\n2026-02,36000,10800,14000,6200,2700\n2026-03,40000,12000,14000,6200,2800\n2026-04,42000,12600,14200,6200,2800\n2026-05,44000,13200,14200,6200,2800\n2026-06,46000,13800,14500,6200,3000\n2026-07,47000,14100,14500,6200,3000\n2026-08,46500,13950,14500,6200,3000\n2026-09,42500,12750,14200,6200,2800\n')]
         st.info('Fictional practice data. These are not actual company results or the earlier Excel model’s forecast.')
+    elif source=='Try statement/report samples':
+        chosen_sample=st.selectbox('Choose a fictional statement/report',list(DEMO_SAMPLES),key='statement_sample')
+        uploads=[(chosen_sample,DEMO_SAMPLES[chosen_sample].encode())]
+        st.info('Fictional test records and illustrative exchange rates. Choose the corresponding File layout below and review every mapping.')
+        st.download_button('Download this test sample',uploads[0][1],chosen_sample,'text/csv')
     elif source=='Enter data manually':
         uploads=manual_history()
         if uploads is None: return None
@@ -487,7 +680,7 @@ def prepare():
     st.caption('Session-only processing: this app does not write uploads to disk or send them to an AI provider. Downloads are yours to save. Use one currency and one location; no currency conversion is performed.')
     currency=st.selectbox('Currency of every uploaded amount',['CAD','Other / mixed currencies'])
     if currency!='CAD':
-        st.warning('This first version calculates in CAD. Convert the records consistently outside the app before using the forecast.'); return None
+        st.info('For each source, use the currency conversion controls with supplied CAD-per-unit rates. Forecasts remain in CAD.')
     selected_sources=[]
     for pos,(filename,content) in enumerate(uploads):
         uploadkey=digest(content)+f'_{pos}'
@@ -518,12 +711,23 @@ def prepare():
                 raw,_=read_file(content,filename,sheet,header)
             except ValueError as exc:
                 st.error(str(exc)); incomplete=True; continue
-            filekey=key+'_'+digest((sheet,header))
+            original_count=len(raw)
+            foreign_headers=any(re.search(r'\b(USD|EUR|GBP|AUD|JPY|CHF|NZD|INR|CNY)\b',str(c),re.I) for c in raw.columns)
+            currency_columns=[c for c in raw.columns if str(c).strip().lower() in ['currency','currency code','ccy']]
+            foreign_codes=any(any(str(v).strip().upper() not in ('CAD','') for v in raw[c]) for c in currency_columns)
+            prepared_source=prepare_special_export(raw,key+'_'+str(header),currency!='CAD' or foreign_headers or foreign_codes)
+            if prepared_source is None:
+                incomplete=True;continue
+            raw,layout,preparation_audit,allowed_amounts=prepared_source
+            notes.append(source_label+': '+preparation_audit)
+            st.caption(f'{original_count:,} original table rows; {len(raw):,} rows after reviewed preparation. Original records and exclusions are available in the source audit download. Bank/report preparation aggregates records into monthly categories; issue row numbers below refer to the prepared table.')
+            filekey=key+'_'+digest((sheet,header,preparation_audit,raw.to_csv(index=False)))
             mode_hint,expense_hint=table_hint(sheet or filename)
+            if layout!='Standard monthly / single-category transactions':mode_hint='Monthly summary'
             modes=['Monthly summary','Sales transactions','Expense transactions']
             mode=st.selectbox('What does this table contain?',modes,index=modes.index(mode_hint),key='mode_'+filekey)
             st.caption('Table type/category may be suggested from the sheet name. Confirm their meaning for your business.')
-            st.caption('Monthly summary: one row per month. Transaction files: one row per sale/payment, with net CAD amounts. Do not include subtotal/grand-total rows. One expense table must contain a single cost category; mixed-category ledgers are not yet supported.')
+            st.caption('Monthly summary: one row per month. Transaction files: one row per sale/payment, with net CAD amounts. Do not include subtotal/grand-total rows. For mixed bank exports choose Mixed bank transactions in File layout above and review each category.')
             expense='other'; negative=False
             if mode=='Expense transactions':
                 expense=st.selectbox('Expense category for every row in this table',COSTS,index=COSTS.index(expense_hint),format_func=lambda x:FIELDS[x],key='expense_'+filekey)
@@ -539,7 +743,8 @@ def prepare():
             columns=st.columns(2)
             for i,field in enumerate(fields):
                 with columns[i%2]:
-                    options=[None]+list(raw.columns)
+                    options=[None]+(allowed_amounts if allowed_amounts is not None and field!='period' else list(raw.columns))
+                    if draft[field] not in options:draft[field]=None
                     mapping[field]=st.selectbox(FIELDS[field],options,index=options.index(draft[field]),format_func=lambda x:'Not provided / choose a column' if x is None else x,key=f'map_{filekey}_{mode}_{field}')
             st.markdown('**Review or correct source values**')
             st.caption('Edits affect this session only. In the original file, use a unique reference column to distinguish genuinely separate identical transactions. Every source row remains visible. Remove subtotal rows in the original file and reupload after confirming they are not transactions.')
@@ -549,7 +754,7 @@ def prepare():
             except ValueError as exc:
                 st.warning(str(exc)); incomplete=True; continue
             issue_count=len(result['issues'])
-            st.write(f"{len(raw):,} source rows · {issue_count:,} review notes")
+            st.write(f"{len(raw):,} prepared rows · {issue_count:,} review notes")
             if issue_count:
                 st.warning('Review the notes and Next step column below. Blank spacer rows need no correction. Missing amounts make affected monthly totals unknown; a nonblank record with a missing/invalid date makes every mapped total in this source uncertain.')
                 st.dataframe(issue_help(result['issues']),hide_index=True,width='stretch')
@@ -558,7 +763,7 @@ def prepare():
                 st.success('Format checks passed. This checks dates, numeric values and possible duplicates; it does not prove completeness, correct accounting classification or business accuracy.')
             st.caption('Ignored columns: '+(', '.join(result['ignored']) or 'None')+'. Ignored columns do not contribute to the calculation.')
             audit=result['rows'].copy(); audit.insert(0,'Source',source_label); audit_frames.append(audit)
-            signatures.append((source_label,header,edited.to_csv(index=False),mapping,mode,expense,order,negative))
+            signatures.append((source_label,preparation_audit,header,edited.to_csv(index=False),mapping,mode,expense,order,negative))
             all_results.append((source_label,result))
             notes.append(f'{source_label}: {len(raw)} rows, {issue_count} review notes; ignored columns: {result["ignored"]}; type: {mode}; mapping: {mapping}; expense category: {expense}; negative expenses: {negative}; dates: {order}.')
     if incomplete:
@@ -766,13 +971,13 @@ def main():
 - **One row for each month:** choose Monthly summary. Match sales and each cost column separately.
 - **One row for each sale/refund:** choose Sales transactions. Match the date and net amount; keep refunds negative.
 - **One row for each expense payment:** choose Expense transactions and confirm its category. Each table must contain one category.
-- **A bank statement with mixed payments, a profit-and-loss report with months across columns, or several locations:** reorganise into supported tables first, or enter reviewed monthly totals manually. Do not map the entire bank balance to sales.
+- **A bank statement or report with months across columns:** choose its File layout after upload. Review categories and exclude non-operating movements or duplicate totals. For multiple currencies, supply currency and CAD-per-unit rate columns and confirm conversion. Multiple locations must still be separated. Do not map a bank balance to sales.
 - **A title above the table:** adjust Header row number until the actual headings appear. Choose the financial worksheets, not README or verification tabs.
 - **Two possible matches:** select the intended column yourself. A heading cannot prove whether an amount includes tax, refunds or employer costs.''')
-        st.caption('Use completed monthly records. Jan 2025, January 2025 and YYYY-MM are supported. For 03/04/2025 choose Day first or Month first. Amounts such as CAD $1,234.50 are accepted; 1.234,50 and foreign currencies need explicit conversion outside the app. A few transaction days do not prove full-month coverage.')
+        st.caption('Use completed monthly records. Jan 2025, January 2025 and YYYY-MM are supported. For 03/04/2025 choose Day first or Month first. Amounts such as CAD $1,234.50 are accepted; Decimal-comma amounts such as 1.234,50 must be reformatted; foreign currencies require the reviewed conversion controls. A few transaction days do not prove full-month coverage.')
     with st.expander('Before you begin · supported files and planning scope'):
         st.write('Use one location’s completed monthly CAD records, or separate sales / single-category expense transactions. Select the worksheets and each header row, review column matches, then correct source values here if needed. Every financial field is optional except the date and at least one amount. Missing data is shown; it does not turn into invented facts.')
-        st.write('Calculations use tested formulas and reviewable heading synonyms. Payroll calculations, mixed-category ledgers, multiple currencies and automatic formula-workbook exports are outside this version.')
+        st.write('Calculations use tested formulas and reviewable heading synonyms. Payroll calculations, automatic exchange-rate lookup, PDF statement extraction and formula-workbook exports are outside this version. CSV/Excel bank exports and sideways reports have explicit preparation controls.')
     history,planning,brief=st.tabs(['01 / Business history','02 / Build your plan','03 / Decision brief'])
     with history:
         prepared=prepare()
