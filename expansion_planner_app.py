@@ -677,7 +677,7 @@ def prepare():
         if len(files)>5:
             st.error('Choose at most five files for this first version.'); return None
         uploads=[(f.name,f.getvalue()) for f in files]
-    st.caption('Session-only processing: this app does not write uploads to disk or send them to an AI provider. Downloads are yours to save. Use one currency and one location; no currency conversion is performed.')
+    st.caption('Session-only processing: this app does not write uploads to disk or send them to an AI provider. Downloads are yours to save. Use one location. Forecasts use CAD; foreign amounts require the reviewed conversion controls and supplied rates.')
     currency=st.selectbox('Currency of every uploaded amount',['CAD','Other / mixed currencies'])
     if currency!='CAD':
         st.info('For each source, use the currency conversion controls with supplied CAD-per-unit rates. Forecasts remain in CAD.')
