@@ -36,6 +36,8 @@ def normalise(value):
 def table_hint(name):
     """Reviewable defaults from familiar table names; not inferred accounting truth."""
     words=set(normalise(name).split())
+    if words & {'monthly','summary','history'}:
+        return 'Monthly summary','other'
     for field,terms in [('cogs',{'ingredient','ingredients','supplier','purchases','cogs'}),
                         ('payroll',{'payroll','wages','salaries'}),
                         ('rent',{'occupancy','premises','rent'}),
@@ -125,7 +127,9 @@ def number(value):
     neg = raw.startswith('(') and raw.endswith(')')
     raw = raw[1:-1] if neg else raw
     raw = re.sub(r'\s+CAD$', '', raw, flags=re.I).strip()
-    raw = re.sub(r'^(?:CAD\s*|\$\s*)', '', raw, flags=re.I).strip()
+    raw = re.sub(r'^(?:CAD\s*)?\$?\s*', '', raw, flags=re.I).strip()
+    if neg and raw.startswith(('-', '+')):
+        raise ValueError('Use either parentheses or a minus sign for a negative amount, not both.')
     if not re.fullmatch(r'[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?', raw):
         raise ValueError('Use a number such as 1234.50 or 1,234.50; no currency conversion is performed.')
     out = float(raw.replace(',', '')) * (-1 if neg else 1)
@@ -139,6 +143,7 @@ def month(value, order='ISO / year first'):
         return pd.Timestamp(value).to_period('M').to_timestamp()
     text = str(value).strip()
     formats = ['%Y-%m', '%Y-%m-%d', '%Y/%m/%d', '%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S']
+    formats += ['%b %Y', '%B %Y', '%b-%Y', '%B-%Y', '%Y/%m']
     formats += {'Day first': ['%d/%m/%Y', '%d-%m-%Y'], 'Month first': ['%m/%d/%Y', '%m-%d-%Y']}.get(order, [])
     for fmt in formats:
         try:
@@ -159,10 +164,20 @@ def analyse(frame, mapping, mode='Monthly summary', expense_field='other', order
         raise ValueError('A mapped column no longer exists. Review the column choices.')
     if not any(mapping.get(f) for f in fields):
         raise ValueError('Choose at least one financial amount column.')
+    if frame.empty:
+        raise ValueError('No records to analyse. Add at least one monthly figure or transaction.')
+    blank = frame.apply(lambda col: col.map(lambda v: pd.isna(v) or str(v).strip()=='' )).all(axis=1).reset_index(drop=True)
     today = pd.Timestamp(today or date.today()).to_period('M').to_timestamp()
     records, issues = [], []
     for pos, (_, row) in enumerate(frame.iterrows()):
         item = {'source_row': pos+header_row+1, 'period': pd.NaT}
+        if blank.iloc[pos]:
+            for f in fields:
+                target=f if mode=='Monthly summary' else 'revenue' if mode=='Sales transactions' else expense_field
+                item[target]=None
+            records.append(item)
+            issues.append({'Source row':item['source_row'],'Field':'row','Issue':'Blank spacer row; retained in the audit and ignored in monthly totals.'})
+            continue
         try:
             item['period'] = month(row[mapping['period']], order)
             if item['period'] >= today:
@@ -189,7 +204,7 @@ def analyse(frame, mapping, mode='Monthly summary', expense_field='other', order
         records.append(item)
     rows = pd.DataFrame(records)
     mapped_fields = [f for f in FINANCIAL if f in rows and (mapping.get(f) if mode == 'Monthly summary' else True)]
-    duplicate = frame.astype(str).duplicated(keep=False)
+    duplicate = frame.astype(str).duplicated(keep=False).reset_index(drop=True) & ~blank
     # Duplicate summary months are ambiguous even if row values differ.
     dup_month = rows['period'].notna() & rows['period'].duplicated(keep=False) if mode == 'Monthly summary' else pd.Series(False, index=rows.index)
     blocked = duplicate | dup_month
@@ -208,7 +223,7 @@ def analyse(frame, mapping, mode='Monthly summary', expense_field='other', order
         grouped.append(entry)
     monthly = pd.DataFrame(grouped, columns=['period']+mapped_fields)
     # Unknown-date amounts could belong to any month: do not certify those field totals.
-    if rows.period.isna().any():
+    if (rows.period.isna() & ~blank).any():
         for field in mapped_fields:
             monthly[field] = float('nan')
     return {'rows': rows, 'monthly': monthly, 'issues': pd.DataFrame(issues, columns=['Source row','Field','Issue']),
@@ -250,6 +265,20 @@ def safe_csv(frame):
     for col in out.columns:
         out[col] = out[col].map(lambda x: "'"+x if isinstance(x,str) and x.lstrip().startswith(('=', '+', '-', '@')) else x)
     return out.to_csv(index=False).encode('utf-8-sig')
+
+
+def issue_help(issues):
+    """Attach a concrete next step without changing source values or validation."""
+    out=issues.copy()
+    def action(text):
+        if 'Blank spacer' in text: return 'No correction needed. This empty row contributes no amounts.'
+        if 'date' in text.lower() or 'historical months' in text: return 'Choose the date order or correct the date. Use a completed month; put future estimates in Build your plan.'
+        if 'duplicate' in text.lower(): return 'Check repeated rows/months. Remove accidental copies in your source; use unique transaction references for genuinely separate entries.'
+        if 'Missing amount' in text: return 'Enter a verified value if available. Otherwise leave it unknown and review the planning estimate; do not enter zero unless confirmed.'
+        if 'negative' in text.lower() or 'sign' in text.lower(): return 'Check refunds and credit signs. For negative expense exports, select the negative-expense option. Never remove a minus sign just to pass a check.'
+        return 'Correct the value using dot decimals, for example 1,234.50 CAD. Currency conversion and decimal-comma amounts are not automatic.'
+    out['Next step']=out['Issue'].map(action)
+    return out
 
 
 from dataclasses import dataclass, asdict
@@ -522,9 +551,9 @@ def prepare():
             issue_count=len(result['issues'])
             st.write(f"{len(raw):,} source rows · {issue_count:,} review notes")
             if issue_count:
-                st.warning('Analysis remains available, but affected monthly totals are unknown. Missing amounts do not become zero. A missing/invalid date makes every mapped financial total in this file uncertain until corrected.')
-                st.dataframe(result['issues'],hide_index=True,width='stretch')
-                issues=result['issues'].copy(); issues.insert(0,'Source',source_label); issue_frames.append(issues)
+                st.warning('Review the notes and Next step column below. Blank spacer rows need no correction. Missing amounts make affected monthly totals unknown; a nonblank record with a missing/invalid date makes every mapped total in this source uncertain.')
+                st.dataframe(issue_help(result['issues']),hide_index=True,width='stretch')
+                issues=issue_help(result['issues']); issues.insert(0,'Source',source_label); issue_frames.append(issues)
             else:
                 st.success('Format checks passed. This checks dates, numeric values and possible duplicates; it does not prove completeness, correct accounting classification or business accuracy.')
             st.caption('Ignored columns: '+(', '.join(result['ignored']) or 'None')+'. Ignored columns do not contribute to the calculation.')
@@ -732,6 +761,15 @@ def main():
     with right:
         st.markdown('<div class="studio-note"><div class="studio-divider"></div><div class="number">36</div><p>MONTHS AHEAD<br><br>Three sales scenarios.<br>One clearer expansion decision.</p></div>',unsafe_allow_html=True)
     st.caption('Use fictional or approved anonymised records for public testing. Uploaded files are processed on the hosting server. Save your downloads before ending the session.')
+    with st.expander('Help me choose · what kind of data do I have?'):
+        st.markdown('''- **Figures in notes or on paper:** choose Enter data manually. Save one completed month at a time.
+- **One row for each month:** choose Monthly summary. Match sales and each cost column separately.
+- **One row for each sale/refund:** choose Sales transactions. Match the date and net amount; keep refunds negative.
+- **One row for each expense payment:** choose Expense transactions and confirm its category. Each table must contain one category.
+- **A bank statement with mixed payments, a profit-and-loss report with months across columns, or several locations:** reorganise into supported tables first, or enter reviewed monthly totals manually. Do not map the entire bank balance to sales.
+- **A title above the table:** adjust Header row number until the actual headings appear. Choose the financial worksheets, not README or verification tabs.
+- **Two possible matches:** select the intended column yourself. A heading cannot prove whether an amount includes tax, refunds or employer costs.''')
+        st.caption('Use completed monthly records. Jan 2025, January 2025 and YYYY-MM are supported. For 03/04/2025 choose Day first or Month first. Amounts such as CAD $1,234.50 are accepted; 1.234,50 and foreign currencies need explicit conversion outside the app. A few transaction days do not prove full-month coverage.')
     with st.expander('Before you begin · supported files and planning scope'):
         st.write('Use one location’s completed monthly CAD records, or separate sales / single-category expense transactions. Select the worksheets and each header row, review column matches, then correct source values here if needed. Every financial field is optional except the date and at least one amount. Missing data is shown; it does not turn into invented facts.')
         st.write('Calculations use tested formulas and reviewable heading synonyms. Payroll calculations, mixed-category ledgers, multiple currencies and automatic formula-workbook exports are outside this version.')
