@@ -374,7 +374,7 @@ def report(plan, summaries, source_notes):
     return '\n'.join(lines)
 
 
-"""Run independently: python -m streamlit run expansion_app.py --server.port 8502."""
+"""Expansion Studio: review business history and explore a proposed location."""
 from dataclasses import asdict
 from hashlib import sha256
 from pathlib import Path
@@ -397,7 +397,7 @@ def money(value):
 
 
 def prepare():
-    st.subheader('1 · Bring your business history')
+    st.subheader('Bring your business history')
     st.write('Upload financial records from one existing location. Start with a monthly summary, or separate sales and expense files.')
     source=st.radio('Choose a starting point',['Try the café example','Upload company files'],horizontal=True)
     if source=='Try the café example':
@@ -494,7 +494,7 @@ def prepare():
     if len(conflicts):
         st.warning('Overlapping file or sheet totals were not added together. The affected field-months are unknown to avoid double counting. Remove the overlapping source or upload a consolidated file.')
         st.dataframe(conflicts,hide_index=True,width='stretch')
-    st.subheader('2 · See what your history supports')
+    st.subheader('What your history supports')
     st.caption('Blank means unknown. A partial month is never presented as a complete total. Rows stay in the source review; only complete field-months support the suggested averages.')
     st.dataframe(monthly,hide_index=True,width='stretch',column_config={'period':st.column_config.DateColumn('Month',format='YYYY-MM'),**{f:st.column_config.NumberColumn(FIELDS[f],format='$ %.2f') for f in FINANCIAL}})
     base,coverage=baseline(monthly)
@@ -516,7 +516,7 @@ def prepare():
 
 
 def plan_inputs(base,key):
-    st.subheader('3 · Describe the proposed location')
+    st.subheader('Design the next location')
     st.write('History suggests a starting point. These are editable planning assumptions for a new location, not a prediction that it will match the existing business.')
     def amount(label,name,default):
         if not 0 <= default <= 1e12:
@@ -586,7 +586,7 @@ def results(plan,notes,key):
     except (ValueError,TypeError) as exc:
         st.error('Please correct the planning input: '+str(exc)); return
     monthly,summary=scenarios['Expected inputs']
-    st.subheader('4 · Your expansion assessment')
+    st.subheader('Your decision brief')
     st.caption('The scenarios change sales and proportional goods costs only. Fixed costs stay the same. These are stress tests, not probabilities. “Year 1” means the first 12 forecast months.')
     a,b,c,d=st.columns(4)
     a.metric('Year 1 sales',money(summary['Year 1 revenue']))
@@ -600,9 +600,9 @@ def results(plan,notes,key):
         chart.loc[monthly.Month.iloc[0]-pd.DateOffset(months=1)]=summary['Opening cash']
         chart=chart.sort_index(); chart['Minimum reserve']=plan.reserve
         figure=go.Figure()
-        for column,color in zip(chart.columns,['#AB7657','#356A60','#99A383','#C5B5A4']):
+        for column,color in zip(chart.columns,['#d87732','#2563eb','#16a3a0','#64748b']):
             figure.add_trace(go.Scatter(x=chart.index,y=chart[column],name=column,mode='lines',line={'color':color,'width':3,'dash':'dash' if column=='Minimum reserve' else 'solid'},hovertemplate='%{x|%b %Y}: $%{y:,.0f}<extra>%{fullData.name}</extra>'))
-        figure.update_layout(height=420,paper_bgcolor='#faf7f2',plot_bgcolor='#faf7f2',font={'color':'#49382d'},margin={'l':10,'r':10,'t':20,'b':10},legend={'orientation':'h','y':-0.2},yaxis={'title':'Cash (CAD)','tickprefix':'$','fixedrange':True},xaxis={'title':None,'fixedrange':True})
+        figure.update_layout(height=420,paper_bgcolor='#ffffff',plot_bgcolor='#ffffff',font={'color':'#14233d'},margin={'l':10,'r':10,'t':20,'b':10},legend={'orientation':'h','y':-0.2},yaxis={'title':'Cash (CAD)','tickprefix':'$','fixedrange':True},xaxis={'title':None,'fixedrange':True})
         st.plotly_chart(figure,use_container_width=True,config={'scrollZoom':False,'displayModeBar':False})
         st.caption('First point is opening cash before trading. Negative cash is an unfunded gap; it is not an available bank balance.')
         st.dataframe(pd.DataFrame({n:s for n,(_,s) in scenarios.items()}),width='stretch',column_config={n:st.column_config.NumberColumn(format='$ %.2f') for n in scenarios})
@@ -644,20 +644,70 @@ def results(plan,notes,key):
 
 
 def main():
-    st.set_page_config(page_title='Expansion Feasibility Planner',page_icon='☕',layout='wide')
-    st.markdown('''<style>.stApp {background: #faf7f2;} h1,h2,h3 {color:#49382d;} [data-testid="stMetric"] {background:white;padding:18px;border:1px solid #e3d9cf;border-radius:12px;} .block-container {max-width:1300px;} </style>''',unsafe_allow_html=True)
-    st.caption('CEDAR & COAST · BUSINESS PLANNING WORKSPACE')
-    st.title('Could your next location work?')
-    st.caption('Public testing preview hosted on Streamlit. Use fictional or approved anonymised records; uploaded files are processed on the hosting server.')
-    st.write('Turn company records into a reviewable expansion plan. Upload → confirm the interpretation → set your plans → explore cash and scenarios.')
-    with st.expander('Start here · what this first version supports'):
+    st.set_page_config(page_title='Expansion Studio',page_icon='◈',layout='wide')
+    st.markdown("""<style>
+    .stApp {background:#f1f5fb;color:#14233d;}
+    .block-container {max-width:1440px;padding-top:4.5rem;padding-bottom:4rem;}
+    h1,h2,h3 {color:#14233d;letter-spacing:-.035em;}
+    h1 {font-family:Georgia,serif !important;font-size:3.8rem !important;line-height:1.06 !important;}
+    h3 {font-size:1.55rem !important;}
+    [data-testid="stSidebar"] {background:#14233d;}
+    [data-testid="stSidebar"] p,[data-testid="stSidebar"] h2,
+    [data-testid="stSidebar"] h3,[data-testid="stSidebar"] li {color:#e5edff;}
+    [data-testid="stSidebar"] hr {border-color:#3d4e6a;}
+    [data-testid="stMetric"] {background:#fff;padding:22px;border:1px solid #dce4f1;border-top:4px solid #2563eb;border-radius:0 0 12px 12px;}
+    [data-testid="stMetricValue"] {font-family:Georgia,serif;color:#14233d;}
+    [data-testid="stExpander"] {background:#fff;border:1px solid #dce4f1;border-radius:12px;}
+    [data-baseweb="tab-list"] {gap:8px;border-bottom:1px solid #cbd7e8;padding-bottom:8px;margin:18px 0;}
+    button[data-baseweb="tab"] {background:#e5ecf7;border-radius:8px;padding:12px 18px;color:#334763;}
+    button[data-baseweb="tab"][aria-selected="true"] {background:#14233d;color:#fff;}
+    [data-baseweb="tab-highlight"] {background:#2563eb;}
+    button[kind="primary"] {background:#2563eb;border-color:#2563eb;border-radius:8px;}
+    button[kind="primary"]:hover {background:#1d4ed8;border-color:#1d4ed8;}
+    .studio-kicker {font-size:.75rem;font-weight:700;letter-spacing:.19em;color:#2563eb;margin:10px 0 20px;}
+    .studio-note {background:#14233d;color:#fff;padding:28px;border-radius:2px 24px 2px 24px;margin:12px 0 24px;}
+    .studio-note .number {font-family:Georgia,serif;font-size:3.2rem;line-height:1.2;color:#9bbdff;}
+    .studio-note p {color:#dce6fb;margin-bottom:0;line-height:1.6;}
+    .studio-divider {height:5px;width:60px;background:#f0a25b;margin-bottom:22px;}
+    @media(max-width:700px) {h1 {font-size:2.6rem !important;} .block-container {padding:4rem 1rem;} button[data-baseweb="tab"] {padding:10px;font-size:.85rem;}}
+    </style>""",unsafe_allow_html=True)
+    with st.sidebar:
+        st.markdown('## ◈ Expansion Studio')
+        st.caption('FROM BUSINESS HISTORY TO A NEW LOCATION')
+        st.divider()
+        st.markdown('### Your planning route')
+        st.markdown('**01 / Business history**\n\nBring your files and confirm what the numbers mean.\n\n**02 / Build your plan**\n\nSet sales, costs, timing and funding for the new location.\n\n**03 / Decision brief**\n\nCompare cash scenarios and take away an action plan.')
+        st.divider()
+        st.markdown('**Planning scope**\n\nOne existing location · CAD\n\n36-month outlook · Pre-tax')
+        st.caption('Assumptions drive the forecast. Review them before making a business decision.')
+    left,right=st.columns([2.2,1],gap='large')
+    with left:
+        st.markdown('<div class="studio-kicker">EXPANSION STUDIO / LOCATION PLANNING</div>',unsafe_allow_html=True)
+        st.title('Make room for what’s next.')
+        st.write('A new location starts with a clear plan. Connect your business history, shape the assumptions, and see how the cash could unfold.')
+    with right:
+        st.markdown('<div class="studio-note"><div class="studio-divider"></div><div class="number">36 months.</div><p>Three sales scenarios.<br>One clearer expansion decision.</p></div>',unsafe_allow_html=True)
+    st.caption('Use fictional or approved anonymised records for public testing. Uploaded files are processed on the hosting server. Save your downloads before ending the session.')
+    with st.expander('Before you begin · supported files and planning scope'):
         st.write('Use one location’s completed monthly CAD records, or separate sales / single-category expense transactions. Select the worksheets and each header row, review column matches, then correct source values here if needed. Every financial field is optional except the date and at least one amount. Missing data is shown; it does not turn into invented facts.')
-        st.write('This app is separate from your Revenue Risk Analyzer. It uses transparent heading synonyms and tested formulas; it has no paid AI dependency. Payroll calculations, mixed-category ledgers, multiple currencies and automatic formula-workbook exports are outside this first version.')
-    prepared=prepare()
-    if prepared:
-        base,notes,key=prepared
-        plan=plan_inputs(base,key)
-        results(plan,notes,key)
+        st.write('Calculations use tested formulas and reviewable heading synonyms. Payroll calculations, mixed-category ledgers, multiple currencies and automatic formula-workbook exports are outside this version.')
+    history,planning,brief=st.tabs(['01 / Business history','02 / Build your plan','03 / Decision brief'])
+    with history:
+        prepared=prepare()
+        if prepared:
+            st.success('History reviewed. Open 02 / Build your plan to set your assumptions.')
+    with planning:
+        if prepared:
+            base,notes,key=prepared
+            plan=plan_inputs(base,key)
+            st.info('When your inputs are ready, open 03 / Decision brief to confirm and calculate.')
+        else:
+            st.info('Start in 01 / Business history. Review your files and tick the confirmation to unlock planning inputs.')
+    with brief:
+        if prepared:
+            results(plan,notes,key)
+        else:
+            st.info('Your decision brief will appear after you review business history and build your plan. It includes cash scenarios, a monthly forecast, actions and downloads.')
 
 
 if __name__=='__main__':
