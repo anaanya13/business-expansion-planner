@@ -616,17 +616,24 @@ def prepare_special_export(raw,key,foreign_required=False):
     options=[REVIEW]+FINANCIAL+[EXCLUDE]
     fmt=lambda f:FIELDS.get(f,f)
     if layout=='Mixed bank transactions':
+        def bank_column(label,columns,aliases,suffix):
+            matches=[c for c in columns if str(c).strip().lower() in aliases]
+            choices=[None]+columns
+            selected=matches[0] if len(matches)==1 else None
+            return st.selectbox(label,choices,index=choices.index(selected),format_func=lambda c:'Choose a column' if c is None else c,key=suffix+key)
         st.warning('Bank cash movements are not automatically accounting revenue or expense. Explicitly exclude loans, transfers, owner funding, tax and equipment purchases from operating history. Review deposits, tax and refunds before using the totals.')
-        datecol=st.selectbox('Bank transaction date',list(working.columns),key='bank_date_'+key)
-        catcol=st.selectbox('Category or description column',list(working.columns),key='bank_cat_'+key)
+        datecol=bank_column('Bank transaction date',list(working.columns),['date','transaction date','posting date'],'bank_date_')
+        catcol=bank_column('Category or description column',list(working.columns),['category','description','transaction type'],'bank_cat_')
         style=st.radio('Bank amount layout',['Signed amount (money in positive)','Separate debit / credit'],key='bank_style_'+key)
         kwargs={}
         if style.startswith('Signed'):
-            kwargs['amount_column']=st.selectbox('Signed amount column',money_columns,key='bank_amount_'+key)
+            kwargs['amount_column']=bank_column('Signed amount column',money_columns,['amount','signed amount','net amount'],'bank_amount_')
         else:
-            kwargs['debit_column']=st.selectbox('Debit / money out column',money_columns,key='bank_debit_'+key)
-            kwargs['credit_column']=st.selectbox('Credit / money in column',money_columns,key='bank_credit_'+key)
+            kwargs['debit_column']=bank_column('Debit / money out column',money_columns,['debit','withdrawal','money out'],'bank_debit_')
+            kwargs['credit_column']=bank_column('Credit / money in column',money_columns,['credit','deposit','money in'],'bank_credit_')
         order=st.selectbox('Bank date order',['ISO / year first','Day first','Month first'],key='bank_order_'+key)
+        if datecol is None or catcol is None or any(v is None for v in kwargs.values()):
+            st.info('Choose the date, category and amount columns before reviewing transaction meanings. Familiar headings are suggested only when unambiguous.');return None
         labels=list(working[catcol].astype(str).unique())
         if len(labels)>100:
             st.info('More than 100 distinct descriptions. Add a category column to your source to group them before importing.');return None
