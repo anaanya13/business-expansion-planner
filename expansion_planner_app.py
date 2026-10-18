@@ -504,6 +504,30 @@ def prepare_sideways(frame,label_column,period_columns,choices):
 DEMO_SAMPLES = {'bank_mixed.csv': 'Date,Category,Amount,Reference\n2025-01-02,Sales,5000,R001\n2025-01-03,Ingredients,-1200,P001\n2025-01-04,Payroll,-1500,P002\n2025-01-05,Rent,-800,P003\n2025-01-06,Loan proceeds,10000,F001\n2025-01-07,Transfer,-2000,T001\n2025-01-08,Sales,-100,R002\n2025-01-09,Ingredients,50,P004\n', 'sideways_profit_loss.csv': 'Account,Jan 2025,Feb 2025,Total\nProduct sales,5000,6000,11000\nService sales,1000,1500,2500\nTotal income,6000,7500,13500\nIngredients,1500,1800,3300\nWages,2000,2100,4100\nRent,800,800,1600\nUtilities,200,,200\nNet profit,1500,2800,4300\n', 'bank_debit_credit.csv': 'Date,Category,Debit,Credit,Reference\n2025-01-01,Sales,,5000,R1\n2025-01-02,Payroll,1500,,P1\n2025-01-03,Sales,100,,R2\n2025-01-04,Payroll,,50,P2\n', 'mixed_currency.csv': 'Date,Category,Amount,Currency,CAD per unit,Reference\n2025-01-01,Sales,1000,USD,1.4,R1\n2025-01-02,Sales,500,CAD,1,R2\n2025-01-03,Ingredients,-100,EUR,1.5,P1\n2025-01-04,Rent,-200,CAD,1,P2\n'}
 
 
+import pandas as pd
+
+def cash_review(plan,monthly,summary):
+    opening=summary['Opening cash']
+    def first_below(threshold):
+        if opening<threshold:return 'Before opening / initial funding'
+        rows=monthly.loc[monthly['Closing cash']<threshold,'Month']
+        return rows.iloc[0].strftime('%b %Y') if len(rows) else 'Not reached within 36 months'
+    opened=monthly[monthly.Open]
+    required=opened['Cash break-even revenue'].max() if len(opened) else float('nan')
+    if summary['Extra funding to maintain reserve']>0:
+        status='Funding gap to resolve'
+    elif (monthly['Net cash flow']<0).all():
+        status='Cash declines throughout the forecast'
+    else:
+        status='Modelled reserve covered'
+    return {'Cash position':status,'Opening investment':plan.capex+plan.deposit_inventory_fees,
+            'Confirmed-in-model funding':plan.equity+plan.loan,'Opening cash':opening,
+            'First below reserve':first_below(plan.reserve),'First below zero':first_below(0),
+            'Highest monthly sales needed for cash costs':None if pd.isna(required) else float(required),
+            'Months with negative cash flow':int((monthly['Net cash flow']<0).sum()),
+            'Additional funding to preserve reserve':summary['Extra funding to maintain reserve']}
+
+
 from dataclasses import asdict
 from hashlib import sha256
 from pathlib import Path
@@ -661,10 +685,48 @@ def prepare_special_export(raw,key,foreign_required=False):
     return working,layout,audit,allowed_amounts if layout=='Standard monthly / single-category transactions' else None
 
 
+
+def estimated_start():
+    st.subheader('Explore an idea without a file')
+    st.warning('Estimates-only plan. These figures describe the proposed location, not verified past performance. You can explore a scenario now and replace estimates with evidence later.')
+    method=st.radio('How would you like to estimate sales?',['Enter monthly sales','Build from daily transactions'],key='estimate_sales_method')
+    missing=[]
+    def entry(label,key):
+        value=st.number_input(label,min_value=0.,max_value=1e12,value=None,step=100.,key='estimate_'+key,placeholder='Enter your estimate; 0 only if genuinely zero')
+        if value is None:missing.append(label)
+        return value
+    if method=='Enter monthly sales':
+        revenue=entry('Expected monthly sales at full trading level (CAD)','sales')
+    else:
+        a,b,c=st.columns(3)
+        with a: transactions=entry('Expected transactions per open day','transactions')
+        with b: ticket=entry('Average sale excluding tax (CAD)','ticket')
+        with c: days=st.number_input('Open days per month',min_value=1,max_value=31,value=26,key='estimate_days')
+        revenue=transactions*ticket*days if transactions is not None and ticket is not None else None
+        if revenue is not None:st.info('Estimated monthly sales = transactions per day × average sale × open days = '+money(revenue))
+    cols=st.columns(2)
+    values={}
+    for i,(field,label) in enumerate([('cogs','Monthly goods / ingredients at these sales (CAD)'),('payroll','Monthly payroll including employer costs (CAD)'),('rent','Monthly rent / occupancy (CAD)'),('other','Other monthly operating costs (CAD)')]):
+        with cols[i%2]:values[field]=entry(label,field)
+    st.caption('Include a salary for your own work in payroll if the business must pay it. Other costs may include insurance, utilities, software, marketing and repairs. If you do not know a figure, obtain a quote or use a clearly labelled estimate; it must not silently become zero.')
+    if missing:
+        st.info('To calculate, enter estimates for: '+', '.join(missing)+'.');return None
+    if revenue<=0 or revenue>1e12:
+        st.warning('Enter a positive monthly sales estimate within the supported range.');return None
+    if values['cogs']>revenue:
+        st.warning('Goods costs exceed sales. Review the business economics before using this simplified model.');return None
+    evidence=st.text_area('What supports these estimates, and what is still uncertain?',key='estimate_evidence',placeholder='For example: rent quote received; customer demand and staffing still estimates.')
+    key=digest(('estimates',revenue,values,evidence,method))
+    if not st.checkbox('I understand these are planning estimates, not historical company results.',key='estimate_review_'+key):return None
+    base={'revenue':revenue,**values,'cogs_ratio':values['cogs']/revenue,'estimate_only':True}
+    return base,'ESTIMATES ONLY — no historical source data.\nBasis/uncertainties: '+(evidence or 'Not supplied')+'\nEntered monthly estimates: '+str(base),key
+
+
 def prepare():
     st.subheader('Bring your business history')
     st.write('Upload financial records from one existing location. Or type monthly figures directly if you do not have a spreadsheet.')
-    source=st.radio('Choose a starting point',['Try the café example','Upload company files','Enter data manually','Try statement/report samples'],horizontal=True)
+    source=st.radio('Choose a starting point',['Try the café example','Upload company files','Enter data manually','Try statement/report samples','Explore with estimates only'],horizontal=True)
+    if source=='Explore with estimates only':return estimated_start()
     if source=='Try the café example':
         uploads=[('cafe_monthly_demo.csv', b'Reporting Month,Net Takings,Ingredient Costs,Staff Costs,Occupancy Costs,Other Expenses\n2025-10,39000,11700,14000,6200,2800\n2025-11,37500,11250,14000,6200,2800\n2025-12,42500,12750,14800,6200,3100\n2026-01,34000,10200,14000,6200,2700\n2026-02,36000,10800,14000,6200,2700\n2026-03,40000,12000,14000,6200,2800\n2026-04,42000,12600,14200,6200,2800\n2026-05,44000,13200,14200,6200,2800\n2026-06,46000,13800,14500,6200,3000\n2026-07,47000,14100,14500,6200,3000\n2026-08,46500,13950,14500,6200,3000\n2026-09,42500,12750,14200,6200,2800\n')]
         st.info('Fictional practice data. These are not actual company results or the earlier Excel model’s forecast.')
@@ -802,12 +864,18 @@ def prepare():
 
 def plan_inputs(base,key):
     st.subheader('Design the next location')
-    st.write('History suggests a starting point. These are editable planning assumptions for a new location, not a prediction that it will match the existing business.')
+    estimates=base.get('estimate_only',False)
+    missing=[]
+    st.write('These are estimates for the proposed location. Enter investment and funding figures explicitly below.' if estimates else 'History suggests a starting point. These are editable planning assumptions for a new location, not a prediction that it will match the existing business.')
+    if estimates:st.warning('Estimates only: no verified historical baseline. The forecast shows what your assumptions imply, not the likelihood of success.')
     def amount(label,name,default):
         if not 0 <= default <= 1e12:
             st.warning(f'{label}: the historical suggestion exceeds the supported range. Review source units and enter a planning amount.')
             default=0.
-        return st.number_input(label,min_value=0.,max_value=1e12,value=float(round(default,2)),step=100.,key=f'plan_{key}_{name}')
+        blank=estimates and name in ['capex','initial','maintenance','equity','loan','reserve']
+        value=st.number_input(label,min_value=0.,max_value=1e12,value=None if blank else float(round(default,2)),step=100.,key=f'plan_{key}_{name}',placeholder='Enter an estimate or verified zero')
+        if value is None:missing.append(label)
+        return value
     a,b,c=st.columns(3)
     with a:
         revenue=amount('Monthly sales at full trading level (CAD)','revenue',base['revenue'] or 0)
@@ -817,7 +885,7 @@ def plan_inputs(base,key):
             st.caption('COGS percentage needs your estimate. The 30% default is illustrative; values above 100% need accounting review.')
             ratio_default=30.
         cogs=st.number_input('Ingredients / goods as % of sales',0.,100.,float(round(ratio_default,2)),key='cogs_'+key)/100
-        growth=st.number_input('Annual sales growth assumption (%)',-50.,100.,5.,key='growth_'+key)/100
+        growth=st.number_input('Annual sales growth assumption (%)',-50.,100.,0. if estimates else 5.,key='growth_'+key)/100
     with b:
         payroll=amount('Monthly payroll incl. employer costs','payroll',base['payroll'] or 0)
         rent=amount('Monthly rent and occupancy','rent',base['rent'] or 0)
@@ -842,7 +910,8 @@ def plan_inputs(base,key):
     with c:
         interest=st.number_input('Loan annual interest (%)',0.,100.,8.,key='interest_'+key)/100
         term=st.number_input('Loan term (months)',1,360,60,key='term_'+key)
-    st.caption('Opening investment/funding defaults are illustrative café assumptions, not extracted from your file. All funding is received and initial uses paid before month 1; interest and rent begin immediately.')
+    st.caption('Funding must be available for this project, after protecting your existing business and personal needs. A loan entered here is a scenario assumption, not approved finance. All funding arrives and initial investment is paid before month 1; interest and rent begin immediately.')
+    if not estimates:st.caption('The prefilled opening investment and funding amounts are illustrative café defaults. Replace them with your own quotes and available funding.')
     with st.expander('Opening ramp, delay costs and seasonality'):
         ramp=st.number_input('Months to reach full sales level',0,24,6,key='ramp_'+key)
         ramp_start=st.number_input('First open month as % of full sales',0.,100.,60.,key='rampstart_'+key)/100
@@ -854,6 +923,8 @@ def plan_inputs(base,key):
             seasonal_df=st.data_editor(pd.DataFrame({'Month':pd.date_range('2027-01-01',periods=12,freq='MS').strftime('%b'), 'Factor':[.85,.9,.95,1.,1.05,1.1,1.1,1.1,1.05,1.,.95,.95]}),disabled=['Month'],hide_index=True,key='factors_'+key)
             factors=tuple(seasonal_df.Factor)
         st.caption('Seasonality defaults are hypothetical and are normalized to average 1. A 6-month ramp starts at 60% and rises evenly to 100%; 0 or 1 means full sales immediately. The horizon remains 36 months even with a delay.')
+    if missing:
+        st.info('Complete these investment/funding assumptions before calculating: '+', '.join(missing)+'. Enter zero explicitly where appropriate.');return None
     return Plan(monthly_revenue=revenue,cogs_ratio=cogs,payroll=payroll,rent=rent,other=other,capex=capex,deposit_inventory_fees=initial,equity=equity,loan=loan,interest=interest,term=term,delay=delay,delay_staff=staff,delay_other=delay_other,annual_growth=growth,annual_inflation=inflation,maintenance=maintenance,reserve=reserve,ramp_months=ramp,ramp_start=ramp_start,start=str(start),seasonality=factors)
 
 
@@ -872,6 +943,24 @@ def results(plan,notes,key):
         st.error('Please correct the planning input: '+str(exc)); return
     monthly,summary=scenarios['Expected inputs']
     st.subheader('Your decision brief')
+    if notes.startswith('ESTIMATES ONLY'):st.warning('ESTIMATES ONLY — this assessment has no verified historical baseline.')
+    review=cash_review(plan,monthly,summary)
+    down_review=cash_review(plan,*scenarios['Lower sales (−20%)'])
+    if review['Additional funding to preserve reserve']>0:
+        st.error('Funding gap to resolve: the expected-input case needs '+money(review['Additional funding to preserve reserve'])+' more to keep your chosen reserve. This gap includes opening investment and later cash losses.')
+    elif down_review['Additional funding to preserve reserve']>0:
+        st.warning('Expected inputs cover the reserve, but lower sales do not. At 20% lower sales, the model needs '+money(down_review['Additional funding to preserve reserve'])+' additional funding.')
+    else:
+        st.info('Both the expected and lower-sales cases cover the chosen reserve under these assumptions. Demand, costs and funding still need independent confirmation.')
+    st.markdown('**When does cash become tight?**')
+    st.write('Expected case first below your reserve: **'+review['First below reserve']+'**. First below zero: **'+review['First below zero']+'**.')
+    st.write('Lower-sales case first below reserve: **'+down_review['First below reserve']+'**. First below zero: **'+down_review['First below zero']+'**.')
+    with st.expander('Where the money goes · opening funds and cash break-even'):
+        st.write('Opening investment: **'+money(review['Opening investment'])+'** · Modelled equity + loan: **'+money(review['Confirmed-in-model funding'])+'** · Cash left after opening investment: **'+money(review['Opening cash'])+'**.')
+        required=review['Highest monthly sales needed for cash costs']
+        st.write('Highest monthly sales needed to cover modelled cash costs during open months: **'+(money(required) if required is not None else 'No finite break-even at this goods-cost ratio')+'**.')
+        st.caption('This is a sales target for cash costs, not a demand forecast. It includes debt payments and maintenance; it excludes tax and working-capital timing. Initial investment is not repaid by this measure.')
+
     st.caption('The scenarios change sales and proportional goods costs only. Fixed costs stay the same. These are stress tests, not probabilities. “Year 1” means the first 12 forecast months.')
     a,b,c,d=st.columns(4)
     a.metric('Year 1 sales',money(summary['Year 1 revenue']))
@@ -894,6 +983,14 @@ def results(plan,notes,key):
     with tabs[1]:
         st.dataframe(monthly,hide_index=True,width='stretch',column_config={'Month':st.column_config.DateColumn(format='YYYY-MM'),**{c:st.column_config.NumberColumn(format='$ %.2f') for c in monthly.columns if c not in ('Month','Open')}})
     with tabs[2]:
+        st.markdown('### What must be verified before committing?')
+        st.caption('This checklist records your own assessment; it does not verify evidence or change the forecast. Download it to keep a copy. Unchecked means unresolved.')
+        checks=[]
+        for topic,action in [('Demand','Test customer demand, average sale and the site’s achievable capacity.'),('Site and permissions','Confirm lease terms, permitted use, licences and opening dates.'),('Cost quotes','Obtain written fit-out, equipment, staffing and supplier estimates.'),('Funding','Confirm equity availability and lender terms; protect cash needed by the existing business.'),('Operating capacity','Confirm who will manage both locations and whether sales shift from the existing site.'),('Tax and cash timing','Review tax, inventory, receivables and payment timing with your accountant.')]:
+            checked=st.checkbox(topic+' verified by me',key='ready_'+key+'_'+digest(asdict(plan))+'_'+topic)
+            checks.append({'Check':topic,'Status':'Owner reports verified' if checked else 'Unresolved','Next action':action})
+        st.dataframe(pd.DataFrame(checks),hide_index=True,width='stretch')
+        st.download_button('Download my readiness checklist',safe_csv(pd.DataFrame(checks)),'expansion_readiness.csv','text/csv')
         if summary['Extra funding to maintain reserve']>0:
             st.error('Funding review required: the expected-input case falls below your minimum reserve. Confirm additional funding or revise the investment, costs or timing before committing.')
         else:
@@ -923,7 +1020,8 @@ def results(plan,notes,key):
         summaries={n:s for n,(_,s) in scenarios.items()}
         st.download_button('Download monthly forecast (CSV)',safe_csv(monthly),'expansion_forecast.csv','text/csv')
         st.download_button('Download scenario comparison (CSV)',safe_csv(pd.DataFrame(summaries).reset_index(names='Metric')),'expansion_scenarios.csv','text/csv')
-        st.download_button('Download recommendation and assumptions',report(plan,summaries,notes),'expansion_report.md','text/markdown')
+        decision_notes=notes+'\n\nCash review — expected inputs:\n'+str(review)+'\nLower-sales cash review:\n'+str(down_review)
+        st.download_button('Download recommendation and assumptions',report(plan,summaries,decision_notes),'expansion_report.md','text/markdown')
         st.download_button('Download planning inputs (JSON)',json.dumps(asdict(plan),indent=2),'expansion_inputs.json','application/json')
         st.caption('CSV downloads open in Excel as values. An automatically generated formula-based workbook and PDF presentation are later milestones.')
 
@@ -974,7 +1072,8 @@ def main():
         st.markdown('<div class="studio-note"><div class="studio-divider"></div><div class="number">36</div><p>MONTHS AHEAD<br><br>Three sales scenarios.<br>One clearer expansion decision.</p></div>',unsafe_allow_html=True)
     st.caption('Use fictional or approved anonymised records for public testing. Uploaded files are processed on the hosting server. Save your downloads before ending the session.')
     with st.expander('Help me choose · what kind of data do I have?'):
-        st.markdown('''- **Figures in notes or on paper:** choose Enter data manually. Save one completed month at a time.
+        st.markdown('''- **Rough figures for a possible new location:** choose Explore with estimates only. No file or historical month is needed.
+- **Actual figures in notes or on paper:** choose Enter data manually. Save one completed month at a time.
 - **One row for each month:** choose Monthly summary. Match sales and each cost column separately.
 - **One row for each sale/refund:** choose Sales transactions. Match the date and net amount; keep refunds negative.
 - **One row for each expense payment:** choose Expense transactions and confirm its category. Each table must contain one category.
@@ -989,17 +1088,19 @@ def main():
     with history:
         prepared=prepare()
         if prepared:
-            st.success('History reviewed. Open 02 / Build your plan to set your assumptions.')
+            st.success('Starting figures reviewed. Open 02 / Build your plan to set your assumptions.')
     with planning:
         if prepared:
             base,notes,key=prepared
             plan=plan_inputs(base,key)
-            st.info('When your inputs are ready, open 03 / Decision brief to confirm and calculate.')
+            if plan is not None:st.info('When your inputs are ready, open 03 / Decision brief to confirm and calculate.')
         else:
             st.info('Start in 01 / Business history. Review your files and tick the confirmation to unlock planning inputs.')
     with brief:
-        if prepared:
+        if prepared and plan is not None:
             results(plan,notes,key)
+        elif prepared:
+            st.info('Complete the missing investment/funding assumptions in 02 / Build your plan first.')
         else:
             st.info('Your decision brief will appear after you review business history and build your plan. It includes cash scenarios, a monthly forecast, actions and downloads.')
 
