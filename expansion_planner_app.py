@@ -528,6 +528,78 @@ def cash_review(plan,monthly,summary):
             'Additional funding to preserve reserve':summary['Extra funding to maintain reserve']}
 
 
+def suggestion_brief(plan, scenarios, source_notes=''):
+    """Explain forecast evidence without inferring causes or verified business facts."""
+    monthly, summary = scenarios['Expected inputs']
+    down_monthly, down = scenarios['Lower sales (−20%)']
+    review = cash_review(plan, monthly, summary)
+    money = lambda value: f'CAD {value:,.0f}'
+    gap = summary['Extra funding to maintain reserve']
+    downside_gap = down['Extra funding to maintain reserve']
+    overview = (
+        f"Over the first 12 forecast months, expected sales are {money(summary['Year 1 revenue'])}, "
+        f"operating earnings are {money(summary['Year 1 EBITDA'])}, and net cash flow is "
+        f"{money(summary['Year 1 net cash flow'])}. Across 36 months, the lowest cash balance "
+        f"including opening is {money(summary['Lowest cash (including opening)'])}, compared with "
+        f"your chosen reserve of {money(plan.reserve)}. The expected funding gap is {money(gap)}; "
+        f"at 20% lower sales it is {money(downside_gap)}."
+    )
+    items = []
+    def add(title, evidence, reason, action):
+        items.append(dict(title=title, evidence=evidence, reason=reason, action=action))
+    if gap > 0:
+        add('Priority · Resolve the expected funding gap',
+            f"Cash first falls below the reserve: {review['First below reserve']}. Additional funding required: {money(gap)}.",
+            'The reserve minus the lowest forecast cash balance is positive. Opening costs and subsequent cash flows both contribute; operating profit alone does not show affordability.',
+            'Review initial spending and ongoing costs, then confirm available funding. Rerun after changes; borrowing adds repayments, so this gap is not a loan recommendation.')
+    elif downside_gap > 0:
+        add('Priority · Protect against weaker sales',
+            f"Expected inputs cover the reserve, but 20% lower sales require {money(downside_gap)} more. Lowest downside cash: {money(down['Lowest cash (including opening)'])}.",
+            'Lower sales reduce contribution after goods costs while fixed costs remain unchanged. The expected case therefore has less protection than it first appears.',
+            'Test demand and capacity at the proposed site. Explore a smaller commitment or contingency funding and rerun the downside case.')
+    else:
+        add('Maintain the cash buffer and verify demand',
+            f"Expected and lower-sales funding gaps are both {money(0)}. Lowest downside cash: {money(down['Lowest cash (including opening)'])}.",
+            'Both scenarios stay at or above the selected reserve, but that reserve is your assumption and a 20% sales stress is not a probability or a worst-case guarantee.',
+            'Confirm that the reserve covers your real obligations, validate customer demand, and test delays and higher costs before committing.')
+    open_rows = monthly[monthly.Open]
+    if plan.cogs_ratio == 1:
+        add('Priority · Review goods costs and pricing', 'Goods costs consume 100% of modelled sales; no finite cash break-even sales target is available.',
+            'Every additional dollar of sales is absorbed by goods costs, leaving nothing to pay fixed costs, maintenance or debt service.',
+            'Verify the goods-cost classification, supplier prices and selling prices. Review this ratio before relying on a sales-growth strategy.')
+    else:
+        short = open_rows[open_rows.Revenue < open_rows['Cash break-even revenue']]
+        add('Check the sales needed to cover cash costs',
+            f"Sales are below cash break-even in {len(short)} of {len(open_rows)} open months. Highest monthly cash break-even: {money(open_rows['Cash break-even revenue'].max())}.",
+            'Cash break-even divides fixed operating costs, debt service and maintenance by the share of sales left after goods costs. Comparing each month avoids treating a single target as constant.',
+            'Compare these monthly targets with achievable transactions and average spending. Review staffing, rent and pricing where targets exceed realistic capacity; this measure does not recover the initial investment.')
+    negative = int((monthly['Net cash flow'] < 0).sum())
+    add('Understand cash use as well as earnings',
+        f"{negative} of 36 months have negative net cash flow. Year 1 operating earnings: {money(summary['Year 1 EBITDA'])}; net cash flow: {money(summary['Year 1 net cash flow'])}.",
+        'Net cash flow deducts interest, loan principal and maintenance from operating earnings. A funded business can still use up cash, and early losses do not by themselves prove long-term failure.',
+        'Review the monthly forecast to distinguish opening/ramp-up losses from continuing cash losses. Adjust the assumptions responsible and rerun; the model cannot verify the business cause.')
+    if plan.delay:
+        pre = monthly[~monthly.Open]
+        add('Prepare for the opening delay',
+            f"{plan.delay} months precede trading; their combined net cash flow is {money(pre['Net cash flow'].sum())}.",
+            'Sales are zero before opening while rent, debt service and the selected shares of staffing and other costs continue.',
+            'Confirm opening dates and payment obligations. Test a longer delay to see whether the reserve still holds.')
+    estimates = source_notes.startswith('ESTIMATES ONLY')
+    add('Replace assumptions with evidence',
+        'This is an estimates-only plan with no verified historical baseline.' if estimates else 'Results use your reviewed inputs. Historical averages and format checks do not verify future demand or accounting completeness.',
+        'A forecast can calculate consistently even when its inputs are uncertain. Taxes, payment timing, changing working capital and effects on the existing location are excluded.',
+        'Obtain sales evidence and written cost/funding quotes. Review source notes and omitted costs, then update the plan and obtain a tax- and cash-timing-aware review.')
+    return {'summary': overview, 'suggestions': items}
+
+
+def suggestion_markdown(brief):
+    lines = ['## Analysis summary', brief['summary'], '', '## Suggestions and reasoning']
+    for item in brief['suggestions']:
+        lines += ['', '### '+item['title'], '**What the analysis shows:** '+item['evidence'],
+                  '**Why this matters:** '+item['reason'], '**Next step:** '+item['action']]
+    return '\n\n'.join(lines)
+
+
 from dataclasses import asdict
 from hashlib import sha256
 from pathlib import Path
@@ -982,7 +1054,18 @@ def results(plan,notes,key):
         st.dataframe(pd.DataFrame({n:s for n,(_,s) in scenarios.items()}),width='stretch',column_config={n:st.column_config.NumberColumn(format='$ %.2f') for n in scenarios})
     with tabs[1]:
         st.dataframe(monthly,hide_index=True,width='stretch',column_config={'Month':st.column_config.DateColumn(format='YYYY-MM'),**{c:st.column_config.NumberColumn(format='$ %.2f') for c in monthly.columns if c not in ('Month','Open')}})
+    brief=suggestion_brief(plan,scenarios,notes)
     with tabs[2]:
+        st.markdown('### Analysis summary')
+        st.write(brief['summary'])
+        st.caption('Suggestions are generated from the reviewed forecast using explicit rules. They explain modelled results, not verified causes or a guarantee that expansion will succeed.')
+        st.markdown('### Suggestions · evidence, reasoning and next steps')
+        for item in brief['suggestions']:
+            with st.container(border=True):
+                st.markdown('#### '+item['title'])
+                st.write('**What the analysis shows:** '+item['evidence'])
+                st.write('**Why this matters:** '+item['reason'])
+                st.write('**Next step:** '+item['action'])
         st.markdown('### What must be verified before committing?')
         st.caption('This checklist records your own assessment; it does not verify evidence or change the forecast. Download it to keep a copy. Unchecked means unresolved.')
         checks=[]
@@ -991,20 +1074,6 @@ def results(plan,notes,key):
             checks.append({'Check':topic,'Status':'Owner reports verified' if checked else 'Unresolved','Next action':action})
         st.dataframe(pd.DataFrame(checks),hide_index=True,width='stretch')
         st.download_button('Download my readiness checklist',safe_csv(pd.DataFrame(checks)),'expansion_readiness.csv','text/csv')
-        if summary['Extra funding to maintain reserve']>0:
-            st.error('Funding review required: the expected-input case falls below your minimum reserve. Confirm additional funding or revise the investment, costs or timing before committing.')
-        else:
-            st.success('The expected-input case stays above the chosen reserve under these assumptions. This is not approval to invest or proof of demand.')
-        down=scenarios['Lower sales (−20%)'][1]['Extra funding to maintain reserve']
-        st.write(f'**Test demand:** the lower-sales case requires {money(down)} additional funding to preserve the reserve. Validate customer counts, average purchase and achievable capacity at the proposed site.')
-        open_rows=monthly[monthly.Open]
-        if len(open_rows):
-            breakeven=open_rows['Cash break-even revenue'].iloc[-1]
-            if pd.notna(breakeven): st.write(f'**Check break-even:** the last forecast month needs about {money(breakeven)} monthly sales to cover the modelled cash costs. This varies by month; see the full table.')
-            else: st.warning('At a 100% goods-cost ratio, sales contribute nothing to fixed costs; no finite sales break-even is available.')
-        st.write('**Verify costs:** obtain equipment, fit-out and lease quotes; confirm employer costs and identify omitted expense categories.')
-        st.write('**Test timing:** increase Months until opening, confirm the revised assumptions, and rerun. Rent and loan payments continue during a delay.')
-        st.write('**Resolve unknowns:** revisit the source review and replace missing values with verified data when available. Reuploading recalculates suggestions and requires a fresh review.')
     with tabs[3]:
         st.markdown('''- **Historical averages:** arithmetic mean of complete months for each category. Categories can use different months; the coverage table lists them.
 - **Goods-cost percentage:** total goods cost ÷ total revenue across months with both values present. Otherwise an explicit assumption is required.
@@ -1020,7 +1089,7 @@ def results(plan,notes,key):
         summaries={n:s for n,(_,s) in scenarios.items()}
         st.download_button('Download monthly forecast (CSV)',safe_csv(monthly),'expansion_forecast.csv','text/csv')
         st.download_button('Download scenario comparison (CSV)',safe_csv(pd.DataFrame(summaries).reset_index(names='Metric')),'expansion_scenarios.csv','text/csv')
-        decision_notes=notes+'\n\nCash review — expected inputs:\n'+str(review)+'\nLower-sales cash review:\n'+str(down_review)
+        decision_notes=notes+'\n\n'+suggestion_markdown(brief)+'\n\nCash review — expected inputs:\n'+str(review)+'\nLower-sales cash review:\n'+str(down_review)
         st.download_button('Download recommendation and assumptions',report(plan,summaries,decision_notes),'expansion_report.md','text/markdown')
         st.download_button('Download planning inputs (JSON)',json.dumps(asdict(plan),indent=2),'expansion_inputs.json','application/json')
         st.caption('CSV downloads open in Excel as values. An automatically generated formula-based workbook and PDF presentation are later milestones.')
